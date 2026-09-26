@@ -58,6 +58,31 @@ class AssessRequest(BaseModel):
         return v
 
 
+class SamplingPlanRequest(BaseModel):
+    timezone: str = Field(..., description="施工地 IANA 时区，如 Asia/Shanghai", examples=["Asia/Shanghai"])
+    night_date: date = Field(..., description="夜间起始日期（当地日历日，窗口为该日 22:00 至次日 06:00）")
+    sampled_times: list[datetime] | None = Field(
+        None,
+        description="已采样时刻（ISO 8601 且必须带时区偏移，按绝对时刻严格递增）；可为 null 或空数组",
+    )
+
+    @field_validator("sampled_times")
+    @classmethod
+    def _times_must_be_aware(cls, v: list[datetime] | None) -> list[datetime] | None:
+        if v is None:
+            return v
+        for t in v:
+            if t.tzinfo is None or t.utcoffset() is None:
+                raise ValueError("时间必须带时区偏移，例如 2026-09-25T22:00:00+08:00")
+        return v
+
+
+class SamplingPlanResponse(BaseModel):
+    added_times: list[datetime] = Field(..., description="需新增的采样时刻（换算到施工地时区，带当地偏移，按时间升序）")
+    added_count: int = Field(..., description="新增采样时刻数量（最少方案）")
+    already_qualified: bool = Field(..., description="原已采样时刻是否已合格（无需任何补点）")
+
+
 class WindowOut(BaseModel):
     start: datetime
     end: datetime

@@ -8,13 +8,15 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from .assessment import AssessmentError, assess, get_timezone
-from .schemas import AssessRequest, AssessResponse
+from .sampling import plan_sampling
+from .schemas import AssessRequest, AssessResponse, SamplingPlanRequest, SamplingPlanResponse
 
 app = FastAPI(
     title="夜间施工噪声核算 API",
     description=(
         "按当地 22:00–次日 06:00 裁剪相邻分贝读数覆盖的时段，"
-        "以持续秒数加权声能计算等效声级 Leq，并给出是否超限的结论。"
+        "以持续秒数加权声能计算等效声级 Leq，并给出是否超限的结论；"
+        "亦可为夜间窗口生成满足 15 分钟间隔约束的最少补点计划。"
     ),
     version="1.0.0",
 )
@@ -72,3 +74,23 @@ async def assess_noise(req: AssessRequest) -> AssessResponse:
         limit_db=req.limit_db,
     )
     return AssessResponse.from_assessment(result, readings_count=len(req.readings))
+
+
+@app.post(
+    "/sampling-plan",
+    response_model=SamplingPlanResponse,
+    tags=["采样规划"],
+    summary="生成夜间窗口的最少补点计划",
+)
+async def sampling_plan(req: SamplingPlanRequest) -> SamplingPlanResponse:
+    tz = get_timezone(req.timezone)
+    plan = plan_sampling(
+        timezone=tz,
+        night_date=req.night_date,
+        sampled_times=req.sampled_times or [],
+    )
+    return SamplingPlanResponse(
+        added_times=plan.added,
+        added_count=len(plan.added),
+        already_qualified=plan.already_qualified,
+    )

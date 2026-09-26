@@ -144,3 +144,119 @@ def test_missing_field_400():
     r = client.post("/assess", json={"timezone": "Asia/Shanghai"})
     assert r.status_code == 400
     assert r.json()["error"]["code"] == "invalid_request"
+
+
+# ---------- POST /sampling-plan ----------
+
+
+def plan_payload(**overrides):
+    p = {
+        "timezone": "Asia/Shanghai",
+        "night_date": "2026-09-25",
+        "sampled_times": [
+            (at(-1 / 6) + timedelta(minutes=10 * i)).isoformat() for i in range(50)
+        ],  # 21:50 .. 06:00 每 10 分钟（已合格）
+    }
+    p.update(overrides)
+    return p
+
+
+def test_sampling_plan_already_qualified():
+    r = client.post("/sampling-plan", json=plan_payload())
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["already_qualified"] is True
+    assert body["added_count"] == 0
+    assert body["added_times"] == []
+
+
+def test_sampling_plan_empty_samples():
+    # sampled_times 缺省 / null / 空数组 等价：整窗需 33 个补点
+    for value in ("omit", None, []):
+        p = {"timezone": "Asia/Shanghai", "night_date": "2026-09-25"}
+        if value != "omit":
+            p["sampled_times"] = value
+        r = client.post("/sampling-plan", json=p)
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["already_qualified"] is False
+        assert body["added_count"] == 33
+        assert len(body["added_times"]) == 33
+        assert body["added_times"][0] == "2026-09-25T22:00:00+08:00"
+        assert body["added_times"][-1] == "2026-09-26T06:00:00+08:00"
+
+
+def test_sampling_plan_fills_gaps_earliest():
+    p = plan_payload(sampled_times=[
+        "2026-09-25T22:00:00+08:00",
+        "2026-09-25T22:40:00+08:00",
+        "2026-09-26T06:00:00+08:00",
+    ])
+    r = client.post("/sampling-plan", json=p)
+    body = r.json()
+    assert body["already_qualified"] is False
+    assert body["added_count"] == 31
+    # 40 分钟空档取较早可行时刻：22:10、22:25
+    assert body["added_times"][0] == "2026-09-25T22:10:00+08:00"
+    assert body["added_times"][1] == "2026-09-25T22:25:00+08:00"
+
+
+def test_sampling_plan_anchors_outside_window():
+    p = plan_payload(sampled_times=[
+        "2026-09-25T21:50:00+08:00",
+        "2026-09-26T06:10:00+08:00",
+    ])
+    r = client.post("/sampling-plan", json=p)
+    body = r.json()
+    assert body["added_count"] == 33
+    assert body["added_times"][0] == "2026-09-25T22:00:00+08:00"
+    assert body["added_times"][1] == "2026-09-25T22:10:00+08:00"
+    assert body["added_times"][-1] == "2026-09-26T05:55:00+08:00"
+
+
+def test_sampling_plan_dst_spring_forward():
+    p = plan_payload(timezone="America/New_York", night_date="2026-03-07", sampled_times=[])
+    r = client.post("/sampling-plan", json=p)
+    body = r.json()
+    # 春季跳变当晚窗口实际 7 小时：29 个补点，按真实秒数等距
+    assert body["added_count"] == 29
+    assert body["added_times"][0] == "2026-03-07T22:00:00-05:00"
+    assert body["added_times"][-1] == "2026-03-08T06:00:00-04:00"
+
+
+def test_sampling_plan_duplicate_400():
+    p = plan_payload()
+    p["sampled_times"][5] = p["sampled_times"][4]
+    r = client.post("/sampling-plan", json=p)
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "duplicate_timestamp"
+
+
+def test_sampling_plan_out_of_order_400():
+    p = plan_payload()
+    p["sampled_times"][3], p["sampled_times"][4] = (
+        p["sampled_times"][4],
+        p["sampled_times"][3],
+    )
+    r = client.post("/sampling-plan", json=p)
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "out_of_order"
+
+
+def test_sampling_plan_naive_time_400():
+    p = plan_payload(sampled_times=["2026-09-25T22:00:00"])
+    r = client.post("/sampling-plan", json=p)
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "invalid_request"
+
+
+def test_sampling_plan_bad_timezone_400():
+    r = client.post("/sampling-plan", json=plan_payload(timezone="Mars/Olympus"))
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "invalid_timezone"
+
+
+def test_sampling_plan_missing_field_400():
+    r = client.post("/sampling-plan", json={"timezone": "Asia/Shanghai"})
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "invalid_request"
