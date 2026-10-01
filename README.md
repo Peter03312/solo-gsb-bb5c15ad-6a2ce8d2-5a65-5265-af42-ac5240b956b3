@@ -46,6 +46,7 @@ docker compose down
 - 服务地址：`http://localhost:8000`（使用 `HOST_PORT` 时替换端口）
 - 健康检查：`GET http://localhost:8000/health`
 - 噪声核算：`POST http://localhost:8000/assess`
+- 采样补点规划：`POST http://localhost:8000/sampling-plan`
 - 交互文档（Swagger UI）：`http://localhost:8000/docs`
 - OpenAPI 描述：`http://localhost:8000/openapi.json`
 
@@ -161,6 +162,87 @@ PY
 { "error": { "code": "out_of_order", "message": "读数时间乱序：..." } }
 ```
 
+## 采样补点规划：`POST /sampling-plan`
+
+在夜间窗口正式采声之前，先规划**最少数量的新增采样时刻**，使采样计划满足：
+
+- 窗口首尾均被覆盖：存在采样时刻 ≤ 当地 22:00、≥ 次日 06:00（缺哪端就在该边界补点）；
+- 所有与窗口有**正重叠**的相邻采样间隔 ≤ 15 分钟（恰好 15 分钟允许）；
+- 补点**只落在窗口内**；窗口外仅取紧邻左、右边界的各一个已有时刻作为锚点，
+  窗外部分与窗口零重叠、不受 15 分钟限制（必要时在边界切点）；
+- 存在多个同为最少点数的方案时，取按绝对时刻排序后**字典序最早**的方案，
+  即优先从较早的可行时刻补起（例如 20 分钟空档补在右端点前 15 分钟处）。
+
+### 请求
+
+`Content-Type: application/json`：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `timezone` | string | 施工地 **IANA 时区**，如 `Asia/Shanghai`、`America/New_York` |
+| `night_date` | string | 夜间**起始日期**（`YYYY-MM-DD`，当地日历日） |
+| `sampled_times` | string[] \| null | 已采样时刻数组，**可为 `null` 或缺省**（表示尚无采样）；每个时刻必须是**带时区偏移**的 ISO 8601 时间，且按**绝对时刻严格递增** |
+
+```bash
+curl -X POST http://localhost:8000/sampling-plan \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "timezone": "Asia/Shanghai",
+    "night_date": "2026-09-25",
+    "sampled_times": [
+      "2026-09-25T22:00:00+08:00",
+      "2026-09-25T22:20:00+08:00"
+    ]
+  }'
+```
+
+上例 22:00–22:20 为 20 分钟空档，最少补 1 点，落在较早的可行时刻 **22:05**
+（22:05→22:20 为 15 分钟；若补 22:15，则 22:00→22:15 虽可行，但方案字典序更晚）；
+尾端 06:00 未覆盖，补齐后窗内其余空档按每 15 分钟反推布点。
+
+### 响应
+
+HTTP 200：
+
+```json
+{
+  "window": {
+    "start": "2026-09-25T22:00:00+08:00",
+    "end": "2026-09-26T06:00:00+08:00",
+    "duration_seconds": 28800.0
+  },
+  "added_times": [
+    "2026-09-25T22:05:00+08:00",
+    "2026-09-25T22:30:00+08:00"
+  ],
+  "added_count": 2,
+  "already_compliant": false
+}
+```
+
+| 字段 | 说明 |
+| --- | --- |
+| `window` | 当地夜间窗口（起止时间戳带当地偏移，`duration_seconds` 按真实秒数） |
+| `added_times` | 新增采样时刻列表，**只落在窗口内**、带施工地当地偏移、按绝对时刻递增 |
+| `added_count` | 新增采样时刻数量（`added_times` 长度） |
+| `already_compliant` | 原已采样数据是否**本身已合格**；为 `true` 时 `added_times` 必为空数组 |
+
+空数组 / `null` / 缺省 `sampled_times` 表示尚无采样：8 小时窗口将补
+`22:00, 22:15, …, 06:00` 共 **33** 个点。原数据已合格时返回
+`"already_compliant": true, "added_times": [], "added_count": 0`。
+
+### 数据合法性规则（HTTP 400，沿用与 `/assess` 相同的错误格式）
+
+- 采样时间**重复**：错误码 `duplicate_timestamp`；
+- 采样时间**乱序**（后一条的绝对时刻早于前一条）：错误码 `out_of_order`；
+- 时间不带时区偏移、请求体不是合法 JSON、缺少必填字段或字段类型错误：
+  错误码 `invalid_request`；
+- IANA 时区无法识别：错误码 `invalid_timezone`。
+
+```json
+{ "error": { "code": "out_of_order", "message": "采样时间乱序：..." } }
+```
+
 ## 时区与夏令时
 
 - 窗口起止按 `timezone` 指定的当地挂钟时间（22:00 / 06:00）确定，时长按**绝对时刻**计算。
@@ -168,6 +250,9 @@ PY
   Leq 的分母与各段时长均按真实秒数计权，不会错误地按挂钟 8 小时计算。
 - 读数可用任意 UTC 偏移提交（例如现场设备用 `Z` 或 `+09:00`），只要绝对时刻正确即可；
   响应中的窗口与裁剪段时间戳统一换算到施工地时区展示。
+- `/sampling-plan` 同样按绝对时刻补点：春跳当晚窗口只有 7 小时（补 29 点）、
+  秋拨当晚有 9 小时（补 37 点），相邻补点严格间隔 900 个真实秒；
+  返回的时间戳带各自有效的当地偏移（如美东春跳后由 `-05:00` 变为 `-04:00`）。
 
 ## 项目结构
 
@@ -175,8 +260,9 @@ PY
 app/
   main.py          # FastAPI 入口、路由与异常处理
   assessment.py    # 窗口裁剪、数据充分性校验、Leq 核心算法
+  sampling.py      # 夜间窗口最少采样时刻补点规划
   schemas.py       # 请求/响应模型
-tests/             # 核心算法与 HTTP 接口测试（共 30 例）
+tests/             # 核心算法与 HTTP 接口测试
 Dockerfile
 docker-compose.yml
 requirements.txt

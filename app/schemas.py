@@ -9,6 +9,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from .assessment import Assessment, Segment, Window, elapsed
+from .sampling import SamplingPlan
 
 
 class ReadingIn(BaseModel):
@@ -124,4 +125,52 @@ class AssessResponse(BaseModel):
             limit_db=result.limit_db,
             exceeds=result.exceeds,
             conclusion="超限" if result.exceeds else "未超限",
+        )
+
+
+class SamplingRequest(BaseModel):
+    timezone: str = Field(..., description="施工地 IANA 时区，如 Asia/Shanghai", examples=["Asia/Shanghai"])
+    night_date: date = Field(..., description="夜间起始日期（当地日历日，窗口为该日 22:00 至次日 06:00）")
+    sampled_times: list[datetime] | None = Field(
+        default=None,
+        description=(
+            "已采样时刻数组（可为 null 或缺省，表示尚无采样）；"
+            "每个时刻必须带时区偏移，如 2026-09-25T22:00:00+08:00，"
+            "且须按绝对时刻严格递增；重复或乱序返回 400"
+        ),
+    )
+
+    @field_validator("sampled_times")
+    @classmethod
+    def _times_must_be_aware(cls, v: list[datetime] | None) -> list[datetime]:
+        if v is None:
+            return []
+        for t in v:
+            if t.tzinfo is None or t.utcoffset() is None:
+                raise ValueError("采样时间必须带时区偏移，例如 2026-09-25T22:00:00+08:00")
+        return v
+
+
+class SamplingResponse(BaseModel):
+    window: WindowOut
+    added_times: list[datetime] = Field(
+        ..., description="新增采样时刻（只落在窗口内，带施工地当地偏移，按绝对时刻递增）"
+    )
+    added_count: int = Field(..., description="新增采样时刻数量")
+    already_compliant: bool = Field(
+        ..., description="原已采样数据是否已满足首尾覆盖、相邻间隔 ≤ 15 分钟的要求"
+    )
+
+    @classmethod
+    def from_plan(cls, plan: SamplingPlan) -> "SamplingResponse":
+        window = plan.window
+        return cls(
+            window=WindowOut(
+                start=window.start,
+                end=window.end,
+                duration_seconds=elapsed(window.start, window.end).total_seconds(),
+            ),
+            added_times=plan.added_times,
+            added_count=plan.added_count,
+            already_compliant=plan.already_compliant,
         )

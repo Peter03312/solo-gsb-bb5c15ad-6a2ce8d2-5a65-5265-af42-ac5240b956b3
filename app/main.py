@@ -8,7 +8,8 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from .assessment import AssessmentError, assess, get_timezone
-from .schemas import AssessRequest, AssessResponse
+from .sampling import plan_sampling
+from .schemas import AssessRequest, AssessResponse, SamplingRequest, SamplingResponse
 
 app = FastAPI(
     title="夜间施工噪声核算 API",
@@ -72,3 +73,19 @@ async def assess_noise(req: AssessRequest) -> AssessResponse:
         limit_db=req.limit_db,
     )
     return AssessResponse.from_assessment(result, readings_count=len(req.readings))
+
+
+@app.post(
+    "/sampling-plan",
+    response_model=SamplingResponse,
+    tags=["采样规划"],
+    summary="为夜间窗口规划最少数量的新增采样时刻",
+)
+async def sampling_plan(req: SamplingRequest) -> SamplingResponse:
+    tz = get_timezone(req.timezone)
+    plan = plan_sampling(
+        tz=tz,
+        night_date=req.night_date,
+        sampled_times=req.sampled_times,
+    )
+    return SamplingResponse.from_plan(plan)
